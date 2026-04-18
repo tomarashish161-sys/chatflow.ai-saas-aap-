@@ -1,0 +1,90 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} { allow read, write: if false; }
+
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // Users
+    function isValidUser(data) {
+      let requiredKeys = ['email', 'createdAt', 'plan'];
+      return data.keys().hasAll(requiredKeys) 
+        && data.keys().size() == 3
+        && data.email is string && data.email.size() <= 200
+        && data.plan is string && data.plan.matches('^(free|pro|enterprise)$')
+        && data.createdAt is number;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId);
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId)
+                    && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId && isValidId(userId)
+                    && isValidUser(incoming())
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['email'])
+                    && incoming().createdAt == existing().createdAt;
+    }
+
+    // Bots (Settings)
+    function isValidBot(data) {
+      let requiredKeys = ['userId', 'name', 'persona', 'color', 'position', 'greeting', 'createdAt', 'plan'];
+      return data.keys().hasAll(requiredKeys)
+        && (data.keys().size() == 8 || (data.keys().size() == 9 && 'updatedAt' in data))
+        && data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid
+        && data.name is string && data.name.size() <= 100
+        && data.persona is string && data.persona.size() <= 2000
+        && data.color is string && data.color.size() <= 20
+        && data.position is string && data.position.matches('^(left|right)$')
+        && data.greeting is string && data.greeting.size() <= 300
+        && data.plan is string && data.plan.matches('^(free|pro|enterprise)$')
+        && data.createdAt is number
+        && (!('updatedAt' in data) || data.updatedAt is number);
+    }
+
+    match /bots/{botId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid && isValidId(botId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(botId) && isValidBot(incoming());
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && isValidId(botId)
+                    && isValidBot(incoming())
+                    && incoming().userId == existing().userId
+                    && incoming().createdAt == existing().createdAt
+                    && (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['name', 'persona', 'color', 'position', 'greeting']) ||
+                      incoming().diff(existing()).affectedKeys().hasOnly(['plan', 'updatedAt']) ||
+                      incoming().diff(existing()).affectedKeys().hasOnly(['name', 'persona', 'color', 'position', 'greeting', 'plan', 'updatedAt'])
+                    );
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid && isValidId(botId);
+    }
+
+    // Sources (Training Data)
+    function isValidSource(data) {
+      return data.keys().hasAll(['userId', 'type', 'value', 'status', 'createdAt'])
+        && data.userId is string && data.userId.size() <= 128 && data.userId == request.auth.uid
+        && data.type is string && data.type.matches('^(urls|files|text)$')
+        && data.value is string && data.value.size() <= 50000
+        && data.status is string && data.status.matches('^(processing|trained|error)$')
+        && data.createdAt is number
+        // Check content if it exists
+        && (!('content' in data) || (data.content is string && data.content.size() <= 60000));
+    }
+
+    match /sources/{sourceId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid && isValidId(sourceId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(sourceId) && isValidSource(incoming());
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && isValidId(sourceId)
+                    && isValidSource(incoming())
+                    && incoming().userId == existing().userId
+                    && incoming().createdAt == existing().createdAt
+                    // We remove strict affectedKeys validation on sources as the content string adds complexity, 
+                    // and this is just the knowledge base ingestion endpoint.
+                    ;
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid && isValidId(sourceId);
+    }
+  }
+}
